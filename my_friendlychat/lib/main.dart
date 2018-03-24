@@ -1,13 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:firebase_database/ui/firebase_animated_list.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:image_picker/image_picker.dart';
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
 
-const String _name = "Thomas";
 
 final ThemeData kDefaultTheme = new ThemeData(
   primarySwatch: Colors.purple,
   accentColor: Colors.orangeAccent[400],
 );
 
+final analytics = new FirebaseAnalytics();
+final googleSignIn = new GoogleSignIn();
+final auth = FirebaseAuth.instance;
+
 void main() => runApp(new FriendlychatApp());
+
 
 class FriendlychatApp extends StatelessWidget {
   // This widget is the root of your application.
@@ -21,14 +35,16 @@ class FriendlychatApp extends StatelessWidget {
   }
 }
 
+
 class ChatScreen extends StatefulWidget {
   @override
   State createState() => new ChatScreenState();
 }
 
-class ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
-  final List<ChatMessage> _messages = <ChatMessage>[];
+
+class ChatScreenState extends State<ChatScreen> {
   final TextEditingController _textController = new TextEditingController();
+  final reference = FirebaseDatabase.instance.reference().child('messages');
   bool _isComposing = false;
 
   @override
@@ -41,11 +57,17 @@ class ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       body: new Column(
         children: <Widget>[
           new Flexible(
-            child: new ListView.builder(
+            child: new FirebaseAnimatedList(
+              query: reference,
+              sort: (a, b) => b.key.compareTo(a.key),
               padding: new EdgeInsets.all(8.0),
               reverse: true,
-              itemBuilder: (_, int index) => _messages[index],
-              itemCount: _messages.length,
+              itemBuilder: (_, DataSnapshot snapshot, Animation<double> animation) {
+                return new ChatMessage(
+                  snapshot: snapshot,
+                  animation: animation
+                );
+              }
             ),
           ),
           new Divider(height: 1.0),
@@ -68,6 +90,21 @@ class ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         margin: const EdgeInsets.symmetric(horizontal: 8.0),
         child: new Row(
           children: <Widget>[
+            new Container(
+              margin: const EdgeInsets.symmetric(horizontal: 4.0),
+              child: new IconButton(
+                icon: new Icon(Icons.photo_camera),
+                onPressed: () async {
+                  await _ensureLoggedIn();
+                  File imageFile = await ImagePicker.pickImage();
+                  int random = new Random().nextInt(100000);
+                  StorageReference reference = FirebaseStorage.instance.ref().child("image_$random.jpg");
+                  StorageUploadTask uploadTask = reference.put(imageFile);
+                  Uri downloadUrl = (await uploadTask.future).downloadUrl;
+                  _sendMessage(imageUrl: downloadUrl.toString());
+                },
+              ),
+            ),
             new Flexible(
               child: new TextField(
                 controller: _textController,
@@ -94,41 +131,64 @@ class ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 
-  void _handleSubmitted(String text) {
+  void _handleSubmitted(String text) async {
     _textController.clear();
     setState(() { _isComposing = false; });
-    ChatMessage message = new ChatMessage(
-      text: text,
-      animationController: new AnimationController(
-        duration: new Duration(milliseconds: 700),
-        vsync: this,
-      ),
-    );
-    setState(() {
-      _messages.insert(0, message);
-    });
-    message.animationController.forward();
+    await _ensureLoggedIn();
+    _sendMessage(text: text);
   }
 
-  @override
-  void dispose() {
-    for (ChatMessage message in _messages)
-      message.animationController.dispose();
-    super.dispose();
+  void _sendMessage({String text, String imageUrl }) {
+    reference.push().set({
+      'text': text,
+      'imageUrl': imageUrl,
+      'senderName': googleSignIn.currentUser.displayName,
+      'senderPhotoUrl': googleSignIn.currentUser.photoUrl,
+    });
+    // ChatMessage message = new ChatMessage(
+    //   text: text,
+    //   animationController: new AnimationController(
+    //     duration: new Duration(milliseconds: 700),
+    //     vsync: this,
+    //   ),
+    // );
+    // setState(() {
+    //   _messages.insert(0, message);
+    // });
+    // message.animationController.forward();
+    analytics.logEvent(name: 'send_message');
+  }
+
+  Future<Null> _ensureLoggedIn() async {
+    GoogleSignInAccount user = googleSignIn.currentUser;
+    if (user == null)
+      user = await googleSignIn.signInSilently();
+    if (user == null) {
+      await googleSignIn.signIn();
+      analytics.logLogin();
+    }
+    if (await auth.currentUser() == null) {
+      GoogleSignInAuthentication credentials = 
+      await googleSignIn.currentUser.authentication;
+      await auth.signInWithGoogle(
+        idToken: credentials.idToken,
+        accessToken: credentials.accessToken,
+      );
+    }
   }
 }
 
 
 class ChatMessage extends StatelessWidget {
-  ChatMessage({this.text, this.animationController});
-  final String text;
-  final AnimationController animationController;
+  ChatMessage({this.snapshot, this.animation});
+  final DataSnapshot snapshot;
+  final Animation animation;
 
   @override
   Widget build(BuildContext context) {
     return new SizeTransition(
       sizeFactor: new CurvedAnimation(
-        parent: animationController,
+        parent: animation,
         curve: Curves.easeOut
       ),
       axisAlignment: 0.0,
@@ -139,16 +199,24 @@ class ChatMessage extends StatelessWidget {
           children: <Widget>[
             new Container(
               margin: const EdgeInsets.only(right: 16.0),
-              child: new CircleAvatar(child: new Text(_name[0])),
+              child: new CircleAvatar(
+                backgroundImage: new NetworkImage(snapshot.value['senderPhotoUrl'])
+              ),
             ),
             new Expanded(
               child: new Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  new Text(_name, style: Theme.of(context).textTheme.subhead),
+                  new Text(snapshot.value['senderName'], 
+                    style: Theme.of(context).textTheme.subhead),
                   new Container(
                     margin: const EdgeInsets.only(top: 5.0),
-                    child: new Text(text),
+                    child: snapshot.value['imageUrl'] != null ?
+                      new Image.network(
+                        snapshot.value['imageUrl'],
+                        width: 255.0,
+                      ) :
+                      new Text(snapshot.value['text']),
                   )
                 ],
               ),
